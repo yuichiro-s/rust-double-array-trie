@@ -1,5 +1,5 @@
 [package]
-name = "double_array_trie"
+name = "double-array-trie"
 version = "0.1.0"
 authors = ["Yuichiro Sawai <sawai.yuichiro.sn0@is.naist.jp>"]
 edition = "2018"
