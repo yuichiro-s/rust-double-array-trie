@@ -5,10 +5,7 @@ use bincode::{deserialize_from, serialize};
 use serde::de::{DeserializeOwned};
 use serde::ser::Serialize;
 
-extern crate flate2;
-use flate2::Compression;
-use flate2::write::GzEncoder;
-use flate2::read::GzDecoder;
+extern crate snap;
 
 use std::fs::File;
 use std::io::{BufWriter, BufReader, Write};
@@ -217,12 +214,13 @@ where
     /// Saves the trie at a given path.
    pub fn save(&self, path: &str, compress: bool) -> Result<(), failure::Error> {
         let f = File::create(path)?;
-        let mut writer = BufWriter::new(f);
         let encoded: Vec<u8> = serialize(&self)?;
+        let mut writer = BufWriter::new(f);
         if compress {
-            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-            encoder.write_all(&encoded)?;
-            writer.write_all(&encoder.finish()?)?;
+            let mut wtr = snap::Writer::new(Vec::new());
+            wtr.write_all(&encoded)?;
+            let compressed = wtr.into_inner()?;
+            writer.write_all(&compressed)?;
         } else {
             writer.write_all(&encoded)?;
         }
@@ -234,7 +232,7 @@ where
         let f = File::open(path)?;
         let mut reader = BufReader::new(f);
         if compressed {
-            let mut decoder = GzDecoder::new(reader);
+            let mut decoder = snap::Reader::new(reader);
             let trie: Trie<V> = deserialize_from(&mut decoder)?;
             Ok(trie)
         } else {
