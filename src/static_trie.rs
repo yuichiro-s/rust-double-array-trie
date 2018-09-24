@@ -1,4 +1,17 @@
-extern crate rand;
+extern crate failure;
+
+extern crate bincode;
+use bincode::{deserialize_from, serialize};
+use serde::de::{DeserializeOwned};
+use serde::ser::Serialize;
+
+extern crate flate2;
+use flate2::Compression;
+use flate2::write::GzEncoder;
+use flate2::read::GzDecoder;
+
+use std::fs::File;
+use std::io::{BufWriter, BufReader, Write};
 
 type NodeIdx = usize;
 const ROOT: NodeIdx = 0;
@@ -8,8 +21,8 @@ type BaseIdx = usize;
 
 const THRESHOLD: f32 = 0.95;
 
-#[derive(Debug, Clone)]
-struct Node<V: Clone + Default> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Node<V> {
     base: BaseIdx,
     check: NodeIdx,
     value: Option<V>, // TODO: make it more memory-efficient
@@ -17,7 +30,7 @@ struct Node<V: Clone + Default> {
 
 impl<V> Node<V>
 where
-    V: Clone + Default,
+    V: Clone + Default + Serialize + DeserializeOwned,
 {
     fn new() -> Node<V> {
         Node {
@@ -36,22 +49,26 @@ fn add_offset(base: BaseIdx, c: u8) -> NodeIdx {
     base + c as usize
 }
 
-#[derive(Debug)]
-pub struct Trie<V: Clone + Default> {
+type Key = Vec<u8>;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Trie<V> {
     nodes: Vec<Node<V>>,
     n_keys: usize,
 }
 
-type Key = Vec<u8>;
-
 impl<V> Trie<V>
 where
-    V: Clone + Default,
+    V: Clone + Default + Serialize + DeserializeOwned,
 {
     /// Creates a new static trie with the given key-value pairs.
     pub fn new(entries: &[(Key, V)]) -> Trie<V> {
         let mut trie = Trie {
-            nodes: vec![Node { base: 0, check: 0, value: None }],
+            nodes: vec![Node {
+                base: 0,
+                check: 0,
+                value: None,
+            }],
             n_keys: entries.len(),
         };
 
@@ -77,7 +94,14 @@ where
         trie
     }
 
-    fn insert<'a>(&mut self, node: NodeIdx, entries: &'a[(Key, V)], depth: usize, base0: BaseIdx, stack: &mut Vec<(NodeIdx, &'a[(Key, V)], usize)>) -> BaseIdx {
+    fn insert<'a>(
+        &mut self,
+        node: NodeIdx,
+        entries: &'a [(Key, V)],
+        depth: usize,
+        base0: BaseIdx,
+        stack: &mut Vec<(NodeIdx, &'a [(Key, V)], usize)>,
+    ) -> BaseIdx {
         // set value of the node
         let first_key = &entries[0].0;
         let children;
@@ -190,6 +214,35 @@ where
         self.n_keys
     }
 
+    /// Saves the trie at a given path.
+   pub fn save(&self, path: &str, compress: bool) -> Result<(), failure::Error> {
+        let f = File::create(path)?;
+        let mut writer = BufWriter::new(f);
+        let encoded: Vec<u8> = serialize(&self)?;
+        if compress {
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&encoded)?;
+            writer.write_all(&encoder.finish()?)?;
+        } else {
+            writer.write_all(&encoded)?;
+        }
+        Ok(())
+    }
+
+    /// Loads a trie from a given path.
+    pub fn load(path: &str, compressed: bool) -> Result<Trie<V>, failure::Error> {
+        let f = File::open(path)?;
+        let mut reader = BufReader::new(f);
+        if compressed {
+            let mut decoder = GzDecoder::new(reader);
+            let trie: Trie<V> = deserialize_from(&mut decoder)?;
+            Ok(trie)
+        } else {
+            let trie: Trie<V> = deserialize_from(&mut reader)?;
+            Ok(trie)
+        }
+    }
+
     fn grow(&mut self, idx: NodeIdx) {
         while self.nodes.len() <= idx {
             let new_size = self.nodes.len() * 2;
@@ -214,8 +267,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    extern crate tempfile;
+    use tempfile::NamedTempFile;
 
-    use rand::{Rng, thread_rng};
+    extern crate rand;
+    use rand::{thread_rng, Rng};
+
     use std::collections::HashMap;
 
     fn make_trie() -> Trie<i32> {
@@ -272,14 +329,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_100k() {
+    fn generate_trie(num: usize) -> (Trie<i32>, HashMap<Vec<u8>, i32>) {
         let mut rng = thread_rng();
 
-        let mut entries = vec![];
         let mut key = vec![];
         let mut map = HashMap::new();
-        while map.len() < 100000 {
+        while map.len() < num {
             // grow or shrink the key randomly
             if rng.gen::<bool>() {
                 key.pop();
@@ -290,13 +345,38 @@ mod tests {
             // create an entry randomly
             if !map.contains_key(&key) && key.len() > 0 && rng.gen::<bool>() {
                 let value = rng.gen::<i32>();
-                entries.push((key.clone(), value));
                 map.insert(key.clone(), value);
             }
         }
 
+        let entries = map.iter().map(|(k, &v)| (k.clone(), v)).collect::<Vec<_>>();
         let trie = Trie::new(&entries);
 
+        (trie, map)
+    }
+
+    #[test]
+    fn test_100k() {
+        let (trie, map) = generate_trie(100000);
+        for (k, &v) in map.iter() {
+            assert_eq!(trie.get(k), Some(v));
+        }
+    }
+
+    #[test]
+    fn test_serde() {
+        let (trie_orig, map) = generate_trie(100000);
+
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap();
+        trie_orig.save(path, false).unwrap();
+        let trie = Trie::load(path, false).unwrap();
+        for (k, &v) in map.iter() {
+            assert_eq!(trie.get(k), Some(v));
+        }
+
+        trie_orig.save(path, true).unwrap();
+        let trie = Trie::load(path, true).unwrap();
         for (k, &v) in map.iter() {
             assert_eq!(trie.get(k), Some(v));
         }
