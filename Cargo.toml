@@ -5,3 +5,4 @@ authors = ["Yuichiro Sawai <sawai.yuichiro.sn0@is.naist.jp>"]
 edition = "2018"
 
 [dependencies]
+rand = "0.5"
