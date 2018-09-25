@@ -211,34 +211,44 @@ where
         self.n_keys
     }
 
-    /// Saves the trie at a given path.
-   pub fn save(&self, path: &str, compress: bool) -> Result<(), failure::Error> {
-        let f = File::create(path)?;
+    /// Serializes the trie into a vector of bytes.
+    pub fn serialize(&self, compress: bool) -> Result<Vec<u8>, failure::Error> {
         let encoded: Vec<u8> = serialize(&self)?;
-        let mut writer = BufWriter::new(f);
         if compress {
             let mut wtr = snap::Writer::new(Vec::new());
             wtr.write_all(&encoded)?;
-            let compressed = wtr.into_inner()?;
-            writer.write_all(&compressed)?;
+            Ok(wtr.into_inner()?)
         } else {
-            writer.write_all(&encoded)?;
+            Ok(encoded)
         }
+    }
+
+    /// Saves the trie at a given path.
+   pub fn save(&self, path: &str, compress: bool) -> Result<(), failure::Error> {
+        let f = File::create(path)?;
+        let data = self.serialize(compress)?;
+        let mut writer = BufWriter::new(f);
+        writer.write_all(&data)?;
         Ok(())
+    }
+
+    /// Deserializes a vector of bytes into a trie.
+    pub fn deserialize<R: std::io::Read>(data: R, compressed: bool) -> Result<Trie<V>, failure::Error> {
+        let trie: Trie<V> = if compressed {
+            let mut decoder = snap::Reader::new(data);
+            deserialize_from(&mut decoder)?
+        } else {
+            deserialize_from(data)?
+        };
+        Ok(trie)
     }
 
     /// Loads a trie from a given path.
     pub fn load(path: &str, compressed: bool) -> Result<Trie<V>, failure::Error> {
         let f = File::open(path)?;
-        let mut reader = BufReader::new(f);
-        if compressed {
-            let mut decoder = snap::Reader::new(reader);
-            let trie: Trie<V> = deserialize_from(&mut decoder)?;
-            Ok(trie)
-        } else {
-            let trie: Trie<V> = deserialize_from(&mut reader)?;
-            Ok(trie)
-        }
+        let reader = BufReader::new(f);
+        let trie = Self::deserialize(reader, compressed)?;
+        Ok(trie)
     }
 
     fn grow(&mut self, idx: NodeIdx) {
@@ -362,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn test_serde() {
+    fn test_serde_file() {
         let (trie_orig, map) = generate_trie(100000);
 
         let file = NamedTempFile::new().unwrap();
@@ -375,6 +385,21 @@ mod tests {
 
         trie_orig.save(path, true).unwrap();
         let trie = Trie::load(path, true).unwrap();
+        for (k, &v) in map.iter() {
+            assert_eq!(trie.get(k), Some(v));
+        }
+    }
+
+    #[test]
+    fn test_serde() {
+        let (trie_orig, map) = generate_trie(100000);
+
+        let trie = Trie::deserialize(trie_orig.serialize(false).unwrap().as_slice(), false).unwrap();
+        for (k, &v) in map.iter() {
+            assert_eq!(trie.get(k), Some(v));
+        }
+
+        let trie = Trie::deserialize(trie_orig.serialize(true).unwrap().as_slice(), true).unwrap();
         for (k, &v) in map.iter() {
             assert_eq!(trie.get(k), Some(v));
         }
